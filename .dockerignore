@@ -1,0 +1,25 @@
+# Git
+.git
+.gitignore
+
+# Python junk
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+
+# Environment and Secrets (PENTING)
+.env
+.secrets
+*.local
+
+# Docker & Logs
+docker-compose.yml
+Dockerfile
+*.log
+
+# Data volumes (agar data Neo4j tidak ikut ter-copy ke image backend)
+data/
+neo4j_data/
