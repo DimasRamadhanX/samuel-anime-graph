@@ -42,16 +42,17 @@ query ($page: Int, $perPage: Int) {
           }
         }
       }
-      characters(sort: [ROLE, FAVOURITES_DESC], perPage: 25) {
+      characters(sort: [ROLE, FAVOURITES_DESC]) {
         edges {
           role
           node {
             id
             name { full }
           }
-          voiceActors(language: JAPANESE) {
+          voiceActors{
             id
             name { full }
+            languageV2
           }
         }
       }
