@@ -103,7 +103,7 @@ async def fetch_anime_stream(pages: int):
                 yield anime_list
                 
                 # Jeda 1 detik agar aman dari ban IP / Rate Limit AniList
-                await asyncio.sleep(0.75) 
+                await asyncio.sleep(0.25) 
                 
             except Exception as e:
                 print(f"Exception on page {page}: {e}")

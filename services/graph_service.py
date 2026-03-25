@@ -10,7 +10,7 @@ class GraphService:
     def setup_constraints(self):
         # schema_init
         with self.provider.get_session() as session:
-            labels = ["Anime", "Character", "Staff", "VoiceActor", "Studio", "Genre", "Demographic", "Source"]
+            labels = ["Anime", "Character", "Staff", "Studio", "Genre", "Demographic", "Source"]
             for label in labels:
                 # Gunakan property 'id' untuk entity, 'name' untuk kategori
                 prop = "name" if label in ["Genre", "Demographic", "Source"] else "id"
@@ -18,23 +18,24 @@ class GraphService:
         logger.info("Constraints re-configured.")
 
     def truncate_database(self):
-        # total_factory_reset
         with self.provider.get_session() as session:
-            # 1. Hapus semua data kecuali Admin
+            # 1. Hapus semua data
             session.run("MATCH (n) WHERE NOT 'Admin' IN labels(n) DETACH DELETE n")
             
-            # 2. Drop semua constraints & indexes agar bersih total
-            res = session.run("SHOW CONSTRAINTS YIELD name")
-            for rec in res: session.run(f"DROP CONSTRAINT {rec['name']}")
+            # 2. Ambil semua nama constraint dan drop satu per satu
+            constraints = session.run("SHOW CONSTRAINTS YIELD name")
+            for record in constraints:
+                session.run(f"DROP CONSTRAINT {record['name']}")
             
-            res = session.run("SHOW INDEXES YIELD name")
-            for rec in res: 
-                if rec['name'] != 'CONSTRAINT_INDEX': # Hindari drop index sistem
-                    try: session.run(f"DROP INDEX {rec['name']}")
-                    except: pass
-                    
+            # 3. Ambil semua nama index dan drop satu per satu
+            # Ini penting karena index sering mengikat nama Label di metadata
+            indexes = session.run("SHOW INDEXES YIELD name")
+            for record in indexes:
+                session.run(f"DROP INDEX {record['name']}")
+
+        # Membangun skema baru (hanya label yang kita mau)
         self.setup_constraints()
-        logger.info("Database deep cleaned.")
+        logger.info("Database deep cleaned. Metadata reset initiated.")
 
     def sync_to_neo4j(self, anime_list):
         # strict_data_sync
@@ -60,17 +61,23 @@ class GraphService:
 
     @staticmethod
     def _create_graph(tx, p):
-        # final_graph_logic
         query = """
-        // 1. Anime & Source
+        // 1. Node Pusat: Anime & Metadata
         MERGE (a:Anime {id: $id})
         SET a.title = $title, a.score = $score, a.year = $year
+        
         MERGE (src:Source {name: $source})
         MERGE (a)-[:BASED_ON]->(src)
 
-        // 2. Genre & Demographic
-        FOREACH (g IN $genres | MERGE (gen:Genre {name: g}) MERGE (a)-[:HAS_GENRE]->(gen))
-        FOREACH (d IN $demographics | MERGE (demo:Demographic {name: d}) MERGE (a)-[:TARGETED_AT]->(demo))
+        // 2. Metadata (Genre & Demographic)
+        FOREACH (g_name IN $genres | 
+            MERGE (g:Genre {name: g_name}) 
+            MERGE (a)-[:HAS_GENRE]->(g)
+        )
+        FOREACH (d_name IN $demographics | 
+            MERGE (d:Demographic {name: d_name}) 
+            MERGE (a)-[:TARGETED_AT]->(d)
+        )
 
         // 3. Studio
         FOREACH (st IN $studios | 
@@ -78,23 +85,50 @@ class GraphService:
             MERGE (a)-[:PRODUCED_BY]->(s)
         )
 
-        // 4. Staff Produksi
-        FOREACH (stf IN $staff_prod |
+        // 4. Kru Produksi (Diproses dalam sub-query agar tidak merusak variabel 'a')
+        CALL {
+            WITH a
+            UNWIND $staff_prod AS stf
             MERGE (s:Staff {id: stf.id}) SET s.name = stf.name
-            MERGE (s)-[:WORKED_AT {role: stf.role}]->(a)
-        )
+            
+            WITH a, s, stf,
+            CASE 
+                WHEN stf.role CONTAINS 'Director' THEN 'Director'
+                WHEN stf.role CONTAINS 'Producer' THEN 'Producer'
+                WHEN stf.role CONTAINS 'Script' THEN 'Writer'
+                WHEN stf.role CONTAINS 'Animator' THEN 'Animator'
+                WHEN stf.role CONTAINS 'Design' THEN 'Designer'
+                WHEN stf.role CONTAINS 'Music' OR stf.role CONTAINS 'Composer' THEN 'Musician'
+                ELSE stf.role 
+            END AS cleanRole
+            
+            MERGE (s)-[:WORKED_ON {role: cleanRole, original_role: stf.role}]->(a)
+            
+            WITH s, cleanRole
+            UNWIND $studios AS st_info
+            MERGE (targetStudio:Studio {id: st_info.id})
+            MERGE (s)-[:WORKED_AT {role: cleanRole}]->(targetStudio)
+        }
 
-        // 5. Character & VoiceActor
-        FOREACH (ch IN $characters |
+        // 5. Karakter & Pengisi Suara (Juga dalam sub-query)
+        CALL {
+            WITH a
+            UNWIND $characters AS ch
             MERGE (c:Character {id: coalesce(ch.node.id, 0)})
-            SET c.name = coalesce(ch.node.name.full, 'Unknown')
+            SET c.name = coalesce(ch.node.name.full, 'Unknown Character')
             MERGE (c)-[:APPEARS_IN {role: coalesce(ch.role, 'SUPPORTING')}]->(a)
             
-            FOREACH (va IN ch.voiceActors |
-                MERGE (v:VoiceActor {id: va.id}) 
-                SET v.name = va.name.full
-                MERGE (v)-[:VOICED_BY {language: coalesce(va.languageV2, 'Unknown')}]->(c)
-            )
-        )
+            WITH a, c, ch
+            UNWIND ch.voiceActors AS va
+            MERGE (v:Staff {id: va.id}) SET v.name = va.name.full
+            
+            MERGE (v)-[:VOICES {language: coalesce(va.languageV2, 'Unknown')}]->(c)
+            MERGE (v)-[:WORKED_ON {role: 'Voice Actor'}]->(a)
+
+            WITH v
+            UNWIND $studios AS st_info
+            MERGE (targetStudio:Studio {id: st_info.id})
+            MERGE (v)-[:WORKED_AT {role: 'Voice Actor'}]->(targetStudio)
+        }
         """
         tx.run(query, **p)
